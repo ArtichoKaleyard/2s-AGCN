@@ -35,3 +35,15 @@ def test_best_effort_loader_skips_shape_mismatches() -> None:
     assert "fc.bias" in report.loaded_keys
     assert "fc.weight" in report.shape_mismatched_keys
     assert "not_a_key" in report.unexpected_keys
+
+
+def test_best_effort_loader_accepts_checkpoint_path(tmp_path) -> None:
+    """best-effort loader 支持从 checkpoint 路径读取。"""
+
+    model = AGCNModel(num_class=5, num_point=25, num_person=2)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save({"state_dict": {"module.fc.bias": torch.zeros(5)}}, checkpoint_path)
+
+    report = load_checkpoint_best_effort(model, checkpoint_path)
+
+    assert "fc.bias" in report.loaded_keys

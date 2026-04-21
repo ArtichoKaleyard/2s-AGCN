@@ -91,7 +91,7 @@ def load_checkpoint_best_effort(
         函数刻意采用 best-effort 策略：不兼容 tensor 会被跳过，而不是强行转换。
     """
 
-    if isinstance(checkpoint, str | Path):
+    if isinstance(checkpoint, (str, Path)):
         raw_checkpoint = torch.load(Path(checkpoint), map_location=map_location)
     else:
         raw_checkpoint = checkpoint

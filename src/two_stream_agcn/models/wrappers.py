@@ -53,7 +53,9 @@ class TwoStreamSkeletonModel(nn.Module):
         """返回融合后的分类 logits。"""
 
         if self.stream_mode in {"joint", "bone"}:
-            stream_name = self.streams[0]
+            stream_name = self.stream_mode
+            if stream_name not in self.models:
+                raise KeyError(f"Missing `{stream_name}` stream model.")
             if isinstance(inputs, dict):
                 if stream_name not in inputs:
                     raise KeyError(f"Missing `{stream_name}` stream input.")

@@ -66,6 +66,31 @@ def test_two_stream_sum_wrapper() -> None:
     assert logits.shape == (2, 5)
 
 
+def test_single_stream_wrapper_uses_requested_stream_key() -> None:
+    """单流包装器按 stream_mode 选择 stream，而不是依赖插入顺序。"""
+
+    wrapper = TwoStreamSkeletonModel(
+        {
+            "joint": lambda: AGCNModel(num_class=5),
+            "bone": lambda: AGCNModel(num_class=5),
+        },
+        stream_mode="bone",
+        fusion=None,
+        num_classes=5,
+    )
+    wrapper.eval()
+    inputs = {
+        "joint": torch.randn(2, 3, 8, 25, 2),
+        "bone": torch.randn(2, 3, 8, 25, 2),
+    }
+
+    with torch.no_grad():
+        expected = wrapper.models["bone"](inputs["bone"])
+        actual = wrapper(inputs)
+
+    assert torch.allclose(actual, expected)
+
+
 def test_foundry_builders_return_project_models() -> None:
     """构建器函数消费具体参数，不调用编译器。"""
 
