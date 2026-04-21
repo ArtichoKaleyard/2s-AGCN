@@ -1,0 +1,20 @@
+# 旧 NTU RGB+D split 文件的项目侧 preset。
+#
+# 本文件只描述 `two_stream_agcn.data.build_legacy_split_datasets` 消费的旧文件位置。
+# dataset/protocol、stream/fusion、graph 和 RunConfig 编译语义仍由 Foundry skeleton
+# 编译器负责。
+
+dataset:
+  name: ntu_rgbd60
+  params:
+    data_root: data/ntu/xsub
+    streams:
+      - joint
+      - bone
+    train_data_joint: train_data_joint.npy
+    train_data_bone: train_data_bone.npy
+    train_label: train_label.pkl
+    val_data_joint: val_data_joint.npy
+    val_data_bone: val_data_bone.npy
+    val_label: val_label.pkl
+    mmap_mode: r

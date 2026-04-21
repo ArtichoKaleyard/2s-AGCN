@@ -1,0 +1,10 @@
+# Foundry ExperimentManifest 的 runs[] 条目字段片段。
+#
+# 用法：把这些字段合并到某个 skeleton run 条目中。字段只负责注册项目侧
+# 构建器并指定实际 model registry 名，不编译 skeleton 高层语义。
+# AAGCN run 将 resolved_model_name 改为 `two_stream_agcn.aagcn`。
+
+register_callables:
+  - two_stream_agcn.integration:register_two_stream_agcn_project
+
+resolved_model_name: two_stream_agcn.agcn
