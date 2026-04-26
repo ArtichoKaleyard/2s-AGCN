@@ -1,0 +1,18 @@
+# Foundry ExperimentManifest for AGCN / NTU60 / X-View / joint+bone sum fusion.
+#
+# 该入口用于试探训练期双流 wrapper；它不是论文最终离线 score ensemble。
+# 为避免双 backbone 显存过高，单步 batch 降为 8，并用 grad_accum_steps=4
+# 保持与既有单流配置相同的有效 batch 32。
+
+name: ntu60_xview_agcn_two_stream_sum_foundry
+output_dir: ./artifacts/experiments/ntu60_xview_agcn_two_stream_sum_foundry
+stop_on_failure: true
+
+runs:
+  - name: train
+    mode: skeleton
+    config_dir: ./conf/skeleton
+    config_name: ntu60_xview_agcn_two_stream_sum
+    register_callables:
+      - two_stream_agcn.integration:register_two_stream_agcn_project
+    resolved_model_name: two_stream_agcn.agcn

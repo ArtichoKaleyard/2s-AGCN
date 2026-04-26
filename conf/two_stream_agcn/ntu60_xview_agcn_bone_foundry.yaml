@@ -1,0 +1,14 @@
+# Foundry ExperimentManifest for AGCN / NTU60 / X-View / bone.
+
+name: ntu60_xview_agcn_bone_foundry
+output_dir: ./artifacts/experiments/ntu60_xview_agcn_bone_foundry
+stop_on_failure: true
+
+runs:
+  - name: train
+    mode: skeleton
+    config_dir: ./conf/skeleton
+    config_name: ntu60_xview_agcn_bone
+    register_callables:
+      - two_stream_agcn.integration:register_two_stream_agcn_project
+    resolved_model_name: two_stream_agcn.agcn

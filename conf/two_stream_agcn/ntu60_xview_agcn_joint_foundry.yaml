@@ -1,0 +1,17 @@
+# Foundry ExperimentManifest for AGCN / NTU60 / X-View / joint.
+#
+# 这份文件固定项目注册入口、实际 model registry 名，以及本地 skeleton 配置位置。
+# 训练超参、数据路径、seed 等长期实验语义由具名 skeleton 配置承载。
+
+name: ntu60_xview_agcn_joint_foundry
+output_dir: ./artifacts/experiments/ntu60_xview_agcn_joint_foundry
+stop_on_failure: true
+
+runs:
+  - name: train
+    mode: skeleton
+    config_dir: ./conf/skeleton
+    config_name: ntu60_xview_agcn_joint
+    register_callables:
+      - two_stream_agcn.integration:register_two_stream_agcn_project
+    resolved_model_name: two_stream_agcn.agcn

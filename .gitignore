@@ -3,10 +3,17 @@
 .idea/
 runs/
 work_dir/
+artifacts/
 
 # Local Codex/session artifacts
+.claude/
 .codex
 .codex/
+
+# Local datasets and generated NTU preprocessing outputs
+data/ntu/
+data/nturgbd_raw/nturgb+d_skeletons
+data/nturgbd_raw/nturgb+d_skeletons_merged/
 
 # Temporary scratch files
 temp/

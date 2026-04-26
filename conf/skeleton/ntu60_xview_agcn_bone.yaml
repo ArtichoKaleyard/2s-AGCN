@@ -1,0 +1,40 @@
+experiment_name: ntu60_xview_agcn_bone_foundry
+data_root: ./data/ntu/xview
+output_dir: ./artifacts/skeleton/ntu60_xview_agcn_bone_foundry
+dataset: ntu60
+protocol: xview
+stream: bone
+model: agcn
+graph_layout: ntu-rgb+d
+graph_strategy: spatial
+epochs: 50
+
+model_params:
+  dropout: 0.5
+  edge_importance_weighting: true
+
+loader:
+  batch_size: 16
+  num_workers: 4
+  persistent_workers: false
+  pin_memory: true
+
+optimizer:
+  name: sgd
+  learning_rate: 0.05
+  weight_decay: 0.0001
+  params:
+    momentum: 0.9
+    nesterov: true
+
+scheduler:
+  name: multistep
+  params:
+    milestones: [30, 40]
+    gamma: 0.1
+
+runtime:
+  device: cuda
+  seed: 49
+  checkpoint_interval: 1
+  grad_accum_steps: 2

@@ -7,3 +7,513 @@
 - 操作：新增 `src/two_stream_agcn` 包、`conf/two_stream_agcn` preset、`pyproject.toml`，并使用 `uv run pytest` 在 Python 3.12 环境验证。
 - 验证：`uv run pytest` 通过 15 个测试；`uv run python -m compileall src tests` 通过。
 - 后续：新增实验配置时只写 Foundry/HydraLoom preset 或显式注册入口，不要在本仓新增 protocol/stream/fusion/graph 合法性规则。
+
+## 2026-04-22 - NTU xview joint 单卡首跑配置
+- 背景：在 `WSL2` 节点复现官方 2s-AGCN 的 `NTU60 / xview / joint` 基线，但当前只有单卡可用。
+- 决策：保留官方 `train_joint.yaml` 不动，新增单独的 `train_joint_single_gpu_probe.yaml` 作为单卡首跑配置。
+- 原因：官方配置里的 `batch_size: 64` 配合 `device: [0,1,2,3]` 是 4 卡总 batch；当前实测单卡 `bs=64` OOM，而 `bs=32/24/16` 可跑，因此先用 `bs=32 + lr=0.05` 做半复现半试探的起点。
+- 操作：在真实 GPU 环境执行单批次前反传压测，确认 `bs=32` 峰值显存约 `11.8 GiB`、`bs=24` 约 `8.9 GiB`、`bs=16` 约 `6.0 GiB`，并新增单卡配置文件。
+- 验证：`uv run python` 压测返回 `bs=32 ok alloc_mb=11821.81 reserved_mb=13180.00`、`bs=24 ok alloc_mb=8872.16 reserved_mb=9580.00`、`bs=16 ok alloc_mb=5964.93 reserved_mb=6578.00`。
+- 后续：如果单卡 `bs=32` 训练不稳，再退到 `bs=16, lr=0.025`；若要更贴论文总 batch，后续可补梯度累积而不是继续抬高单卡 batch。
+
+## 2026-04-22/23 - NTU60 xview 数据准备与 Foundry 实验归档
+- 背景：首次在 Foundry 路线下复现 `AGCN / NTU60 / xview`，并需要把实验入口从长命令收敛到仓库内配置。
+- 决策：把实验语义放到 `conf/skeleton/*.yaml`，把运行入口和项目注册放到 `conf/two_stream_agcn/*_foundry.yaml`；保留 `conf/skeleton/config.yaml` 兼容旧入口，但新的实验一律使用具名 skeleton 配置。
+- 关键事实：
+  - `~/Datasets/ntu-rgbd/skeletons/nturgb+d_skeletons` 才是纯 `NTU60 (A001-A060)` 源目录。
+  - `~/Datasets/ntu-rgbd/skeletons` 根目录混有 `A061-A120`，不能直接拿来生成 `NTU60` 的 `xview` 数据。
+  - 纯 `NTU60` 重建后：
+    - `data/ntu/xview/train_label.pkl` 标签范围是 `0..59`
+    - `data/ntu/xview/val_label.pkl` 标签范围是 `0..59`
+    - 样本数约为 `train=37646`、`val=18932`
+- Foundry 入口归档：
+  - joint：
+    - `conf/skeleton/ntu60_xview_agcn_joint.yaml`
+    - `conf/two_stream_agcn/ntu60_xview_agcn_joint_foundry.yaml`
+    - `conf/two_stream_agcn/ntu60_xview_agcn_joint_resume_foundry.yaml`
+  - bone：
+    - `conf/skeleton/ntu60_xview_agcn_bone.yaml`
+    - `conf/two_stream_agcn/ntu60_xview_agcn_bone_foundry.yaml`
+    - `conf/two_stream_agcn/ntu60_xview_agcn_bone_resume_foundry.yaml`
+- Foundry skeleton compiler 的默认 `runtime.seed` 是 `7`；如果不想吃默认值，必须显式写进 skeleton 配置。本仓当前 joint/bone Foundry 配置统一固定为 `seed: 49`。
+- 断点续训约定：
+  - 正式训练入口与断点续训入口分开归档。
+  - `*_foundry.yaml` 用于首轮训练；`*_resume_foundry.yaml` 只覆盖 `runtime.resume_from=.../last.pt`，避免把 resume 参数重新散到命令行。
+
+## 2026-04-23 - AGCN / NTU60 / xview / joint Foundry 结果
+- 背景：用 Foundry 路线运行 `AGCN / NTU60 / xview / joint` 单流，目标是验证 Foundry 可用性并拿到论文量级结果。
+- 训练配置：
+  - `batch_size: 16`
+  - `grad_accum_steps: 2`
+  - `learning_rate: 0.05`
+  - `num_workers: 4`
+  - `pin_memory: true`
+  - `seed: 49`
+- 结果：
+  - 最优 epoch：`46`
+  - 最优验证精度：`0.9404711599408409`（约 `94.05%`）
+  - 最终 epoch 50 验证精度：`0.9398373124867948`
+  - 结果文件：`artifacts/skeleton/ntu60_xview_agcn_joint_foundry/{summary.json,metrics.json,train.log}`
+- 结论：
+  - joint 单流 Foundry 版本整体正常，可稳定跑满 50 epoch。
+  - 该结果与 CVPR19 论文 `Js-AGCN` 在 `NTU60 xview` 上的 `93.7%` 同量级且略高，可视为单卡资源约束下的等效复现。
+  - 这不是严格逐项同配复现，因为当前是单卡、`batch_size=16 + grad_accum_steps=2`、`lr=0.05`，但任务定义、数据划分和量级结果都是正确的。
+
+## 2026-04-23 - AGCN / NTU60 / xview / bone Foundry 随机假死排查
+- 背景：bone 单流在 Foundry 路线下多次随机假死；joint 单流 50 epoch 正常。问题代价很高，因为假死往往出现在长跑数小时之后，不能依赖大量改动和频繁重跑来抓。
+- 当前最重要的结论：
+  - 问题是 `bone` 特有，`joint` 目前未复现。
+  - 问题不是稳定 OOM；显存贴边会导致明显变慢，但与“随机假死”不是同一种现象。
+  - 问题并非只发生在 `num_workers>0` 或 `pin_memory=true` 的组合下；即使 `num_workers: 0`、`pin_memory: false`，bone 训练仍会随机挂起。
+  - 当前证据不足以把问题定性为单纯的“内存不足”；更像长时间运行后触发的非确定性运行时问题。
+- 已做过并确认的排查：
+  1. 数据文件本身正常。
+     - `data/ntu/xview/train_data_bone.npy`、`val_data_bone.npy` 抽样检查形状和值都正常，没有 NaN/Inf。
+  2. 可疑批次区间纯取数正常。
+     - 以 `batch 330-390` 对应的样本区间做纯取数扫描，`LegacySkeletonSplitDataset + DataLoader(num_workers=0)` 可稳定取出，没有固定坏样本。
+  3. 现代 adapter 与旧官方 feeder 的单样本内容完全一致。
+     - 对多个样本索引做 A/B 对照，`LegacySkeletonSplitDataset` 与 `feeders.feeder.Feeder` 返回的 `bone` 数组逐元素完全相同，`max diff = 0.0`。
+  4. `memmap` 不是现代化代码特有。
+     - 旧官方 `feeders.feeder.Feeder` 默认也支持 `use_mmap=True`，因此不能简单把问题归咎为“modern adapter + memmap”。
+  5. 旧官方 feeder 路径也会假死。
+     - 排查时曾临时接入旧官方 feeder 路径做 A/B；该版本依然能随机卡住，因此现代 adapter 基本被排除为主因。
+- 挂死现象中已抓到的关键信息：
+  - 有一次卡在：
+    - `optimizer_step_done` 之后
+    - 下一条 `batch_start` 之前
+  - 另一次（`official-feeder` 版）卡在：
+    - `batch_start`
+    - `forward_done`
+    - `backward_done`
+    - 缺少 `optimizer_step_done`
+    - 更像挂在 `optimizer.step()` 或其附近的 CUDA 同步点
+  - 两次挂点并不固定，因此是非确定性的。
+- 运行态观察：
+  - 假死时主训练进程常表现为高 CPU 占用，但并不稳定推进。
+  - 有时 GPU 仍有非零利用率和较高显存占用，说明不是简单“进程已死”。
+  - `nvidia-smi` 在不同现场曾显示：
+    - 显存贴边（例如 `15.6GB / 16.3GB`）且速度明显变慢
+    - 但也有显存未打满时发生的假死
+  - 因此“显存贴边”是诱因或放大器，但不是唯一根因。
+- 与外部环境相关的事实：
+  - `uu` 远程重连后，曾出现“性能立刻恢复且无需重开训练”的情况，怀疑 `uu` 远程异常吃掉约 `2-3GB` 显存。该问题和假死目前没有直接证据证明是同一个根因，但会明显影响速度和显存裕量。
+  - WSL 默认不限制内存；系统内存、swap、共享显存可能放大运行时异常，但当前证据不足以把主因直接归结为“WSL 内存限制”。
+- 经验规则：
+  - 再抓下一次假死的代价非常高，后续排查必须优先“少改训练路径、少加日志、少污染实验本身”。
+  - 不要再做和核心问题无关的吞吐测试来替代“假死定位”；吞吐测试只能回答快慢和显存，不回答“为什么随机挂”。
+
+## 2026-04-23 - official-feeder 现场级假死证据
+- Context:
+  - 旧官方 feeder 路径的 bone 训练再次随机假死，且这次明确要求不 kill 进程，优先围绕活现场做观察。
+- Decision:
+  - 把根因怀疑集中到 `Foundry 先初始化 CUDA，再 fork DataLoader workers` 这一顺序，而不是继续怀疑 bone 数据内容或现代 adapter。
+- Why:
+  - 当前骨流正式配置 `conf/skeleton/ntu60_xview_agcn_bone.yaml` 仍是 `num_workers: 4`、`pin_memory: true`。
+  - Foundry 当前 `build_training_components()` 顺序是先 `model_builder(..., device=cuda)`，后 `build_dataloaders(...)`。
+  - 活现场里主进程和 worker 同时持有 `/dev/dxg`、`nvcubins.bin` 与 bone 数据文件句柄，说明 worker 是在父进程碰过 CUDA 之后出来的。
+  - `strace` 抓到主进程内部两个线程持续对 `eventfd + pipe` 做 `poll(..., timeout=100ms)`，两个 `pt_data_pin` 线程则对 pipe 做 `poll(..., timeout=5000ms)`；大量其他线程停在 `futex`。
+  - `ps` / `/proc` 现场同时显示：主进程高 CPU 自旋、worker 全在 `do_sys_poll`、主进程 IO 不再推进、GPU 利用率很低。
+  - 系统内存与 swap 不是主因：可用内存仍充足，主进程 `VmSwap=0`，PSI 的 memory/io/cpu 压力均为 0。
+- Action/Command:
+  - 用 `ls -l /proc/<pid>/fd` 固定主进程与 worker 共享的 CUDA/data fd 证据。
+  - 用限时 `strace` 旁路附加主进程，抓到 `poll/futex` 现场。
+  - 用 `ps -Lp`、`/proc/<pid>/io`、`free -h`、`/proc/pressure/*` 排除系统内存/IO 压力主因。
+- Verification:
+  - 已确认：
+    - worker 继承 CUDA 句柄这件事是真实存在的，不是猜测。
+    - 当前挂点更像 DataLoader/pipe/eventfd 管线进入坏状态，不像还在正常读 `.npy`。
+    - 旧官方 feeder 路径也会挂，因此现代 adapter 不是主因。
+- Follow-up:
+  - 下一轮最省时间的验证应使用独立临时脚本做 A/B，而不是继续污染正式训练入口。
+  - 若 `safe` 或 `spawn` 明显缓解/消失，再回头考虑把 Foundry 正式修到 dataloader 先于 CUDA 初始化，或至少为这类训练显式启用 `spawn/forkserver`。
+
+## 2026-04-23 - 低算力 bone 假死复现脚本策略修正
+- Context:
+  - 为了更快复现 bone 假死，曾计划直接做 `foundry/safe` A/B；但重新检查脚本后发现，之前把“构建 DataLoader 对象”和“启动 worker 进程”当成了同一个时刻。
+- Decision:
+  - 重写 `temp/repro_foundry_bone_hang.py`，把复现目标从“长跑很多 batch”改成“少算力、高 worker churn”，并把 `safe` 模式改成真正的预热 worker 诊断模式。
+- Why:
+  - PyTorch 的 worker 是在 `iter(loader)` 时启动，不是在 `build_dataloaders()` 或 `DataLoader(...)` 时启动。
+  - 仅仅把 DataLoader 对象创建放到 CUDA 初始化之前，并不能避免“CUDA 之后再 fork worker”。
+  - 原 bone 配置 `persistent_workers=false`，正式训练会在 train/val 之间、跨 epoch 频繁重建 worker；这才是更值得压的危险条件。
+- Action/Command:
+  - 排查时曾临时使用低算力脚本做 `foundry/safe` A/B：
+    - `foundry`：先初始化 CUDA/model，再反复重建 `train/val` loader 并只跑极少 batch，最大化 post-CUDA worker churn
+    - `safe`：CUDA 前预热 worker，并强制 `persistent_workers=True` 复用 worker 池，作为诊断对照
+- Verification:
+  - 该临时脚本帮助定位了一个关键点：若 `pin_memory=true`，即使还没建模型，loader 构建路径也可能通过 `torch.cuda.is_available()` 提前触碰 CUDA。
+- Follow-up:
+  - 后续若要再次定位类似问题，应优先使用仓库外或临时脚本，而不是把调试逻辑留在正式项目入口里。
+  - `safe` 模式是诊断对照，不是正式训练语义等价物；它的价值在于验证 post-CUDA worker fork 是否是主因。
+
+## 2026-04-24 - Foundry 0.3.2 + bone resume 的新现象：不一定保留活现场
+- Context:
+  - 升级到 Foundry `0.3.2` 并把 `LegacySkeletonSplitDataset` 改成对 `spawn` 友好的懒加载后，bone resume 再次出现“看起来像假死”的现象。
+- Decision:
+  - 这类现象不能默认继续按“活进程假死”处理；要先复查目标 PID 是否还活着，再判断是挂住还是已经静默退出。
+- Why:
+  - 这次用户报“又一次假死了”时，现场主进程一度表现为高 CPU、低 GPU 利用率，但很快就消失了。
+  - 复查时已无对应 `foundry.config.cli schedule` 训练进程，`train.log` 停在 `epoch=10`，`last.pt` 也记录为 `epoch=10`，说明这轮至少成功保存到了第 10 轮。
+  - `artifacts/experiments/ntu60_xview_agcn_bone_resume_foundry/schedule_summary.json` 仍是更早一次 manifest 覆盖失败时留下的旧文件，不能拿来判断这次运行状态。
+- Action/Command:
+  - 用 `ps -ef | rg 'foundry.config.cli schedule|ntu60_xview_agcn_bone_resume_foundry|ntu60_xview_agcn_bone_foundry'` 先确认进程是否仍存活。
+  - 用 `tail -n 80 artifacts/skeleton/ntu60_xview_agcn_bone_foundry/train.log` 与读取 `last.pt` 元数据确认最新落盘 epoch。
+  - 用 `torch.load(.../last.pt, map_location="cpu")` 确认这轮最新断点实际停在 `epoch=10`。
+- Verification:
+  - 已确认：
+    - 这次“假死”在复查时已经不再有活进程。
+    - 最新有效断点为 `epoch=10`，不是停在更早的 `epoch=6`。
+    - 这轮现象与之前“长时间保留活现场、可做 strace 抓取”的挂起不完全相同。
+- Follow-up:
+  - 下次再遇到类似现象，优先第一时间确认 PID 是否还活着；如果进程已退，后续重点应转向“为什么静默退出且没有把失败信息写进 train.log”，而不是继续按活锁/死锁处理。
+
+## 2026-04-24 - Foundry 0.3.2 + spawn 路径下仍可复现 bone 活现场挂起
+- Context:
+  - 在升级到 Foundry `0.3.2`、项目侧 `LegacySkeletonSplitDataset` 改为 `spawn` 友好的懒加载后，bone resume 仍然出现了保留活 PID 的挂起现场。
+- Decision:
+  - 不能再把问题单独归因为旧的 `fork-after-CUDA-init`。`spawn` 路径下仍存在一种新的、但形态相近的活锁/挂起。
+- Why:
+  - 真实环境里仍有整条训练进程链存活：
+    - `uv run ... bone_resume_foundry.yaml`
+    - 主 Python 进程
+    - `resource_tracker`
+    - 8 个 `spawn_main` 子进程
+  - 主进程线程视图显示：
+    - 主线程 `R` 态，高 CPU（约 85%~91%）
+    - 一个 `pt_autograd_0` 线程有少量 CPU
+    - 两个 CUDA/事件处理线程停在 `do_sys_poll`
+    - 两个 `pt_data_pin` 线程停在 `do_sys_poll`
+  - `strace` 的关键新证据：
+    - 主进程主线程不是阻塞，而是在极高频率反复调用 `sched_yield()`，形成用户态空转。
+    - 主进程内两个轮询线程持续对 `eventfd + pipe` 做 `poll(..., timeout=100ms)`。
+    - `pt_data_pin` 线程对单个 pipe 做 `poll(..., timeout=5000ms)`，反复超时后继续轮询。
+    - `spawn` 子进程主线程先从 `restart_syscall(<... read ...>)` 恢复，再 `getppid()`，随后对单个 pipe 做 `poll(..., timeout=5000ms)`。
+  - `fd` 与 IO 现场配合说明：
+    - 主进程仍持有 `/dev/dxg`、`nvcubins.bin`、大量 pipe 和多个 `eventfd`
+    - 子进程仍持有 `train_data_bone.npy`
+    - 但子进程 `read_bytes` 为 `0`，说明它们此时并未继续推进文件读取，而是在等队列/管道
+- Action/Command:
+  - 用真实环境的 `nvidia-smi`、`ps -p/-Lp`、`/proc/<pid>/fd`、`/proc/<pid>/io` 固定进程/句柄/IO 现场。
+  - 由于 `ptrace_scope=1`，使用短时间 `sudo strace -f -tt -T -yy` 抓主进程与两个 `spawn` 子进程。
+- Verification:
+  - 已确认：
+    - 这次挂起不是“训练已经退出但显存没退”。
+    - 这次挂起也不是“worker 还在持续读 bone 文件”。
+    - 主进程正在用户态 `sched_yield()` 空转，worker/pin 线程则在 pipe/eventfd 上超时轮询。
+- Follow-up:
+  - 后续排查方向应转向：
+    - `spawn` 路径下的 DataLoader / pin-memory / queue 协调问题
+    - 或主进程某个消费者/调度器在空转 while-loop 中不再消费队列
+  - 不宜再把问题简单归因为旧的 `fork-after-CUDA-init`；该假设至多解释了旧形态的一部分，不足以解释当前 `spawn` 活现场。
+
+## 2026-04-24 - 当前最强嫌疑转为“两个 train DataLoader iterator 重叠”
+- Context:
+  - 在同一次 bone resume 活现场中，进一步把配置、子进程数量、打开的数据文件、PyTorch DataLoader 源码和 `strace` 形态对在了一起。
+- Decision:
+  - 当前最强嫌疑不再是单纯的 worker 启动方式，而是：**旧的 train DataLoader iterator 没有及时完成清理，新一轮 train iterator 又被创建，导致两个 train iterator 同时存在并最终挂住。**
+- Why:
+  - 骨流正式配置 `conf/skeleton/ntu60_xview_agcn_bone.yaml` 明确是：
+    - `num_workers: 4`
+    - `persistent_workers: false`
+    - `pin_memory: true`
+  - 活现场却存在：
+    - `8` 个 `spawn_main` 子进程
+    - `2` 个 `pt_data_pin` 线程
+  - 逐个检查这 `8` 个子进程的 fd 后确认：它们打开的全是 `train_data_bone.npy`，没有一个打开 `val_data_bone.npy`。
+  - 这说明当前不是“一个 train iterator + 一个 val iterator”并存，而更像是**两个 train iterator** 叠在一起，每个 iterator 各自带着 4 个 worker 和自己的 pin-memory 线程。
+  - PyTorch DataLoader 源码显示：
+    - `persistent_workers=False` 时，每次 `DataLoader.__iter__()` 都会创建新的 `_MultiProcessingDataLoaderIter`
+    - worker 关闭依赖该 iterator 的 `_shutdown_workers()` / `__del__()`
+    - 每个 multiprocessing iterator 在 `pin_memory=True` 时都会创建一个独立的 `pt_data_pin` 线程
+  - Foundry `BaseTask.run_epoch()` 当前写法是 `progress = tqdm(dataloader, ...)` 然后直接 `for batch in enumerate(progress)`，没有显式关闭或显式销毁底层 iterator；这会把 worker 关闭完全交给 PyTorch 迭代器析构时机。
+- Action/Command:
+  - 用 `ls -l /proc/<pid>/fd` 逐个核对 8 个 worker 打开的 bone 文件。
+  - 用 `uv run python` 读取 PyTorch DataLoader 源码，确认 `persistent_workers=False` 和 pin-memory 线程的行为。
+  - 用 `strace` 固定主进程主线程 `sched_yield()` 空转、pin-memory 线程 `poll(pipe, 5000)` 超时、worker `poll(pipe, 5000)` 等待的新形态。
+- Verification:
+  - 已确认：
+    - 配置只允许单个 iterator 拥有 4 个 worker。
+    - 现场却同时存在 8 个 train worker 和 2 个 pin-memory 线程。
+    - 这组现象最符合“前一个 train iterator 尚未完全销毁，后一个 train iterator 已经创建”的解释。
+- Follow-up:
+  - 下一个本地修复方向应优先检查/验证：
+    - 在 `BaseTask.run_epoch()` 中显式持有底层 iterator，而不是直接把 `DataLoader` 交给 `tqdm`
+    - epoch 结束时显式 `progress.close()`、释放 iterator 引用
+    - 必要时在 `finally` 中对 multiprocessing iterator 调用受保护的 `_shutdown_workers()` 作为防御性清理
+  - 这条修复若有效，意义在于防止 train-to-train 的迭代器重叠，而不只是继续围绕 `spawn/fork` 做猜测。
+
+## 2026-04-24 - 与 PyTorch Lightning 对比后的 Foundry 升级方向
+- Context:
+  - 在 `spawn` 挂起现场被进一步收敛到“两个 train iterator 重叠”之后，又对比了 Foundry 当前训练 loop 与 PyTorch Lightning 的 loop/data-fetcher 生命周期设计。
+- Decision:
+  - 不把问题表述成“Foundry 固有缺陷”，而是把它整理成一个生命周期加固方向的升级议题。
+- Why:
+  - Foundry 当前 `BaseTask.run_epoch()` 直接对 `tqdm(dataloader)` 做 `for batch in ...`，没有显式持有底层 multiprocessing iterator，也没有显式 epoch teardown。
+  - Lightning 则更明确地把这些职责放在 loop/data_fetcher 生命周期里：
+    - `on_run_start()` 创建 iterator
+    - `on_run_end()` / `teardown()` 管理资源回收
+    - 在 fault-tolerant 路径中还会考虑 dataloader state
+  - Foundry 当前 checkpoint 仍然是干净的 epoch-level 语义：模型、优化器、scheduler、history、best metric；这本身没问题，但也意味着 loop/dataloader state 目前不在恢复范围内。
+- Action/Command:
+  - 对比本地 Foundry 包中的：
+    - `foundry/tasks/base.py`
+    - `foundry/runtime/runner.py`
+    - `foundry/runtime/checkpoints.py`
+    - `foundry/data/loaders.py`
+  - 参考 Lightning 官方源码文档中的 training/evaluation loop 生命周期实现。
+  - 基于这些对比，在 Foundry 仓库创建升级 issue：
+    - https://github.com/ArtichoKaleyard/Foundry/issues/4
+- Verification:
+  - 新 issue 的定位是：
+    - 显式 iterator ownership
+    - 显式 epoch teardown
+    - 轻量 data fetcher / loop-owned iterator wrapper
+    - 更强的 loop / dataloader resume 语义
+    - 可选的“多重 multiprocessing iterator”诊断
+- Follow-up:
+  - 本地若继续修复/验证，优先围绕 iterator 生命周期做最小补丁，而不是继续把问题抽象成单纯的 `fork/spawn` 讨论。
+
+## 2026-04-25 - Foundry 0.3.3 后 bone 仍假死：剩余问题已定位到模型 CUDA add kernel
+- Context:
+  - Foundry 更新到 `0.3.3` 后，`BaseTask.run_epoch()` 已经改为通过 `build_epoch_iterator()` 显式持有并清理 epoch iterator；bone resume 仍然再次假死。
+- Decision:
+  - 当前不能再把剩余假死继续归因为“两个 train DataLoader iterator 重叠”。0.3.3 下该问题看起来已经被修掉；新的活现场显示主因转向模型 forward 内的 CUDA native 层挂起。
+- Why:
+  - 当前真实环境中 Foundry 版本为 `0.3.3`，`run_epoch()` 已经使用：
+    - `with self.build_epoch_iterator(dataloader, desc) as epoch_iterator`
+  - 活现场只剩：
+    - `4` 个 `spawn_main` worker
+    - `1` 个 `pt_data_pin` 线程
+  - 这与 `conf/skeleton/ntu60_xview_agcn_bone.yaml` 中 `num_workers: 4` 对齐，不再出现 8 worker / 2 pin thread 的重叠 iterator 形态。
+  - 4 个 worker 全部打开 `train_data_bone.npy`，但 `read_bytes` 基本不推进；这次更像 worker 在等待下一批任务，而不是 DataLoader 管线本身出现重复生命周期。
+  - `py-spy dump --pid <main>` 连续三次采样都显示主线程停在：
+    - `two_stream_agcn/models/agcn.py:83`
+    - `UnitGCN.forward()`
+    - `output = output + self.down(x)`
+    - 调用链位于 `l3` 的 AGCN forward 中
+  - `py-spy dump --native` 进一步显示 native 栈为：
+    - `sched_yield`
+    - `libcuda.so`
+    - `cuLaunchKernel`
+    - `cudaLaunchKernel`
+    - `at::native::gpu_kernel_impl_nocast<CUDAFunctor_add<float>>`
+    - `at::native::add_kernel`
+    - `torch Tensor add`
+  - 因此当前挂点是 CUDA add kernel launch / execution 路径，而不是 Python DataLoader 的 `queue.get()`。
+  - 当时 GPU 状态约为：
+    - 显存 `15387 MiB / 16303 MiB`
+    - 剩余约 `609 MiB`
+    - GPU 利用率约 `6%`
+    - memory-util 约 `4%`
+  - 系统内存/IO 压力仍不高，主进程 `VmSwap=0`，PSI memory/io/cpu 基本为 0。
+- Action/Command:
+  - 使用真实环境 `ps` / `nvidia-smi` 确认活进程和显存占用。
+  - 用 `py-spy dump` 抓 Python 栈，定位到 AGCN `UnitGCN.forward()`。
+  - 用 `py-spy dump --native` 抓 native 栈，确认卡在 CUDA add kernel，而非 DataLoader。
+  - 对比官方 `model/agcn.py` 发现官方实现是 `y += self.down(x)`，而现代实现当前是 `output = output + self.down(x)`。
+- Verification:
+  - 已确认：
+    - Foundry 0.3.3 的 iterator 生命周期修复生效，至少本现场没有再出现两个 train iterator。
+    - 剩余假死是新的形态：单 iterator + 模型 forward CUDA add kernel 挂起。
+- Follow-up:
+  - 下一轮本地验证优先考虑把 `src/two_stream_agcn/models/agcn.py` 的 `UnitGCN.forward()` 对齐官方写法，使用 in-place residual add：`output += self.down(x)`。
+  - 该改动的意义是减少一次残差加法的新张量分配，并更贴近官方 2s-AGCN 实现；在当前显存余量很低的 WSL/CUDA 13/PyTorch 2.11 环境中，这可能影响 CUDA allocator / kernel launch 行为。
+  - 如果 in-place residual add 仍复现，再考虑进一步降低 batch 或开启 AMP/降低显存压力，把问题从 Foundry 生命周期排查转入 PyTorch/CUDA/模型算子稳定性排查。
+
+## 2026-04-25 - bone 活现场补充：CUDA add 是挂点，不等于根因
+- Context:
+  - 用户指出“显存压力只会导致变慢或 OOM，不应解释长期假死”。围绕仍存活的 bone 训练进程继续做只读诊断，未 kill 进程。
+- Decision:
+  - 不再把显存压力写成当前假死根因；当前最稳妥表述是：主线程在 CUDA driver 内部 busy-yield，`agcn.py:83` 的 tensor add 是可见挂点，但由于 CUDA 异步执行，它不一定是真正制造问题的前驱算子。
+- Why:
+  - 5 秒采样显示主进程 IO 完全不变，只增加少量非自愿上下文切换，说明训练没有慢速推进。
+  - 关键线程状态：
+    - 主线程 `R` 态，`sched_yield()` 高频自旋。
+    - CUDA event handler、autograd、pin-memory、DataLoader workers 均为睡眠/轮询状态。
+    - 4 个 worker 只持有 `train_data_bone.npy`，没有 `/dev/dxg`，也没有持续 IO。
+  - `py-spy --native` 仍显示主线程在 `cuLaunchKernel -> CUDAFunctor_add<float> -> Tensor add`。
+  - 当前进程环境没有 `CUDA_LAUNCH_BLOCKING`，因此现有 Python 行号只能定位“错误暴露点/等待点”，不能严格定位真实前驱 CUDA op。
+  - 本机真实 PyTorch wheel 为 `torch 2.11.0+cu130`，`torch.cuda.get_arch_list()` 包含 `sm_120`，设备为 `RTX 5070 Ti / capability (12, 0)`；因此这不是旧式“wheel 不支持 Blackwell 架构 / no kernel image”的问题。
+  - WSL `dmesg` 未显示当前时间点对应的 dxg/GPU reset/Xid/OOM 记录；历史 OOM 与本次挂死时间不对应。
+- Action/Command:
+  - 对主进程和关键线程读取 `/proc/<pid>/task/<tid>/status`、`syscall`、`stack`、`sched`。
+  - 对主进程做 5 秒 `/proc/<pid>/io` 与 context switch delta。
+  - 检查 worker fd、主进程 CUDA/dxg/eventfd/pipe fd、`/proc/<pid>/maps` 中 CUDA/torch 动态库路径。
+  - 在真实 GPU 环境运行 `torch.cuda.get_arch_list()` 核对架构支持。
+- Verification:
+  - 已确认当前现场不是 DataLoader 等数据、不是 Linux 侧可见 OOM、不是旧式 sm_120 不支持。
+  - 当前仍无法从已启动进程反推出真实前驱算子；下一轮若要定位前驱，应使用 `CUDA_LAUNCH_BLOCKING=1` 或在 AGCN 关键 CUDA op 后插入受控 `torch.cuda.synchronize()`。
+- Follow-up:
+  - 下次重跑前，优先准备一个“同步化诊断配置/入口”，而不是继续给正式训练加普通日志。
+  - 若同步化后挂点从 residual add 移到更早的 matmul/conv/bn，再按真实前驱算子继续排查。
+
+## 2026-04-25 - AGCN CUDA 同步诊断入口保持默认语义不变
+- Context:
+  - 为定位 bone 假死的真实前驱 CUDA 算子，需要在模型内部插入同步点；同时用户要求代码本身语义不变，不影响长期训练等价性。
+- Decision:
+  - 回退此前临时改动 `output += self.down(x)`，恢复为当前项目原语义 `output = output + self.down(x)`。
+  - 新增默认关闭的 `cuda_sync_debug` 模型参数，并单独归档诊断 manifest：
+    - `conf/two_stream_agcn/ntu60_xview_agcn_bone_cuda_sync_debug_foundry.yaml`
+- Why:
+  - `+=` 虽然对齐官方 AGCN 写法，但它不是纯诊断改动，会改变当前现代实现的执行形式。
+  - `torch.cuda.synchronize()` 只在显式开启诊断参数时插入同步屏障，不改变 tensor 数值；默认关闭时正式训练路径不受影响。
+  - 诊断入口归档到 manifest，避免把 `model_params.cuda_sync_debug=true` 散落在命令行。
+- Action/Command:
+  - 在 `src/two_stream_agcn/models/agcn.py` 加入 `_cuda_sync_debug_checkpoint()`，覆盖 AGCN `matmul`、adjacency add、`conv_d`、subset add、BN、residual add 和 TCN-GCN block 输出等关键位置。
+  - 在 `src/two_stream_agcn/integration.py` 中把 `model_params.cuda_sync_debug` 传入 `AGCNModel`。
+- Verification:
+  - `python3 -m py_compile src/two_stream_agcn/models/agcn.py src/two_stream_agcn/integration.py` 通过。
+  - 诊断 manifest `dry-run` 通过。
+  - 同一权重、同一 CPU 输入下，`cuda_sync_debug=False` 与 `cuda_sync_debug=True` 的前向输出 `max_abs_diff=0.0` 且 `allclose=True`。
+- Follow-up:
+  - 当前活进程不会加载这批改动；只有下一轮诊断 resume 才能验证真实前驱算子。
+
+## 2026-04-25 - 同步诊断跑到 epoch 50 后假死：前驱缩到输入归一化
+- Context:
+  - 使用 `ntu60_xview_agcn_bone_cuda_sync_debug_foundry.yaml` 从 epoch 32 resume，训练推进到 `train 50/50: 502/2353` 后再次假死。
+- Decision:
+  - 当前可见挂点已经从 AGCN block 内部 residual add 提前到 `forward_features()` 的首个同步点，即 `normalize_skeleton_input()` 之后、`l1` 之前。
+- Why:
+  - `py-spy dump` 显示主线程位于：
+    - `torch.cuda.synchronize`
+    - `_cuda_sync_debug_checkpoint`
+    - `two_stream_agcn/models/agcn.py:199`
+    - `forward_features`
+  - `agcn.py:199` 是 `normalize_skeleton_input(...)` 返回后的第一个同步点。
+  - 该同步点之前的 CUDA 计算范围主要在 `common.py`：
+    - `x.permute(...).contiguous().view(...)`
+    - `data_bn(x)`
+    - 后续 reshape/permute/contiguous/view
+  - 因此当前无法再把真正前驱算子指向 AGCN graph conv 的 matmul/add；更可能在输入 `data_bn` 或其前后的 contiguous/copy 路径。
+  - 当前仍是单 iterator 形态：4 workers + 1 pin thread，worker 睡眠，DataLoader 无推进。
+  - 5 秒 IO delta 为 0，仅少量非自愿 context switch 增加，说明不是慢速训练推进。
+- Action/Command:
+  - 抓取当前 PID `1864030` 的 `py-spy dump`、`py-spy dump --native`、`ps`/线程状态和短时 `strace`。
+  - `strace` 仍显示 CUDA event/poll 线程定期 `poll(..., timeout=100ms)`，主训练 IO 不推进。
+- Verification:
+  - 已确认同步诊断有效：它把原先漂移到后续 `add` 的挂点提前到 `normalize_skeleton_input` 后。
+- Follow-up:
+  - 下一轮若继续细分，应把同步点拆进 `normalize_skeleton_input()` 内部：
+    - 第一次 `contiguous().view(...)` 后
+    - `data_bn(x)` 后
+    - 第二次 `contiguous().view(...)` 后
+  - 这能区分是输入内存重排/copy、`BatchNorm1d` 本身，还是 BN 之后的重排触发的 CUDA 等待。
+
+## 2026-04-25 - 输入归一化内部同步点已补齐
+- Context:
+  - 当前活进程已停在 `normalize_skeleton_input()` 返回后的同步点，无法从该进程继续反推出内部哪一步是前驱；用户询问是否还能进一步排查。
+- Decision:
+  - 保持当前活进程不 kill、不注入代码；为下一轮诊断把同步点下沉进 `normalize_skeleton_input()` 内部。
+- Why:
+  - 已启动进程停在 `cudaDeviceSynchronize()`，前驱 Python op 已返回；继续 attach 只能确认 driver 同步等待。
+  - 更细粒度定位需要下一轮运行时在内部步骤后同步。
+- Action/Command:
+  - 在 `src/two_stream_agcn/models/common.py` 中新增共享 `cuda_sync_debug_checkpoint()`。
+  - 在 `normalize_skeleton_input()` 的三处插入默认关闭的同步点：
+    - 第一次 `permute(...).contiguous().view(...)` 后
+    - `data_bn(x)` 后
+    - 第二次 `permute(...).contiguous().view(...)` 后
+  - `src/two_stream_agcn/models/agcn.py` 改为复用 common 里的同步 helper。
+- Verification:
+  - `python3 -m py_compile src/two_stream_agcn/models/common.py src/two_stream_agcn/models/agcn.py src/two_stream_agcn/integration.py` 通过。
+  - 同一权重、同一 CPU 输入下，`cuda_sync_debug=False/True` 输出仍为 `max_abs_diff=0.0` 且 `allclose_exact=True`。
+- Follow-up:
+  - 下一轮同一个 `ntu60_xview_agcn_bone_cuda_sync_debug_foundry.yaml` 会自动使用更细同步点。
+
+## 2026-04-26 - NTU60 xview AGCN two-stream sum fusion 试探入口
+- Context:
+  - bone 单流在同步诊断中最终卡到 epoch 50，继续等待同一路径复现代价过高；转向试探训练期 joint+bone fusion wrapper。
+- Decision:
+  - 新增 two-stream sum fusion 配置，而不是把参数散落到命令行：
+    - `conf/skeleton/ntu60_xview_agcn_two_stream_sum.yaml`
+    - `conf/two_stream_agcn/ntu60_xview_agcn_two_stream_sum_foundry.yaml`
+- Why:
+  - 当前 `TwoStreamSkeletonModel(fusion=sum)` 是训练期双 backbone wrapper，不是论文最终离线 score ensemble。
+  - 为控制双 backbone 显存，使用 `batch_size=8 + grad_accum_steps=4`，保持有效 batch 32，对齐当前单流近似复现口径。
+- Action/Command:
+  - `dry-run` 验证 Foundry 配置组合通过。
+  - 编译后的 dataset/model params 为 `streams=['joint', 'bone']`、`stream_mode='two_stream'`、`fusion='sum'`。
+  - 做了单批次 GPU smoke test：DataLoader 返回 `joint/bone` 双输入，模型输出 `(8, 60)`，可完成 `cross_entropy.backward()`。
+- Verification:
+  - 单批次峰值约 `alloc_mb=5950.52`、`reserved_mb=6344.0`。
+  - 该 smoke test 只证明配置、输入结构和起步显存可用，不保证长训不复现 CUDA 假死。
+- Follow-up:
+  - 长训命令：
+    - `UV_CACHE_DIR=/home/atk/PyCharm/2s-AGCN/temp/uv-cache uv run python -m foundry.config.cli schedule --manifest ./conf/two_stream_agcn/ntu60_xview_agcn_two_stream_sum_foundry.yaml`
+
+## 2026-04-26 - Two-stream sum 长训完整结束
+- Context:
+  - `ntu60_xview_agcn_two_stream_sum_foundry` 原本用于试探双 backbone 训练期融合与长训稳定性。
+- Decision:
+  - 保留该结果作为“同类训练不必然假死”的反例，但不把它当成论文官方双流复现结果。
+- Why:
+  - 日志完整到 `run_end best_epoch=50 accuracy=0.9405`，`schedule_summary.json` 状态为 `success`。
+  - 当前 `ps` 未见对应 Foundry/训练进程残留，说明不是前台丢失或僵持状态。
+  - 该模型是 `TwoStreamSkeletonModel(fusion=sum)` 的训练期融合，仍不同于官方旧仓库的 joint/bone 单流 score ensemble。
+- Action/Command:
+  - 长训配置：`conf/two_stream_agcn/ntu60_xview_agcn_two_stream_sum_foundry.yaml`
+  - 输出目录：`artifacts/skeleton/ntu60_xview_agcn_two_stream_sum_foundry`
+- Verification:
+  - `best_primary_metric_value=0.9404711599408409`
+  - `best_epoch=50`
+  - `final_val_metrics.accuracy=0.9404711599408409`
+- Follow-up:
+  - 假死仍按低概率 CUDA/PyTorch/WSL/Blackwell 运行时问题继续看待；这次成功降低了“Foundry 或 two-stream wrapper 必然触发”的可能性。
+
+## 2026-04-26 - 冻结 logits 融合头实验
+- Context:
+  - 用户澄清原意是“只训练融合头”，不是重新训练 joint/bone 双 backbone。
+- Decision:
+  - 新增离线 logits 融合头脚本 `scripts/experiments/train_offline_fusion_head.py`，复用已训练单流 `best.pt`，导出 train/val joint+bone logits 后只训练小 head。
+- Why:
+  - 该方案避免重训 backbone，显存风险低，并且不会把融合参数散落到命令行。
+  - 验证集 logits 只用于评估，不参与 head 拟合，避免数据泄漏。
+- Action/Command:
+  - `linear` head：`120 -> 60` 全连接。
+  - `scalar` head：学习 joint/bone 两个全局正权重和 per-class bias。
+  - 输出目录：`artifacts/ensemble/ntu60_xview_agcn_fusion_head`
+- Verification:
+  - fixed sum baseline：Top-1 `0.9537291526794434`，Top-5 `0.9933974146842957`。
+  - scalar head：best epoch `75`，Top-1 `0.9540988802909851`，Top-5 `0.9927635788917542`；学到 joint/bone 权重约 `1.0527 / 0.6926`。
+  - linear head：best epoch `500`，Top-1 `0.943746030330658`，Top-5 `0.9911261796951294`。
+- Follow-up:
+  - 当前没有证据表明训练 logits fusion head 稳定优于官方 fixed sum；scalar 只微幅提升 Top-1，linear 明显退化。
+
+## 2026-04-27 - 官方式 alpha sweep 补全
+- Context:
+  - 用户要求把 official score fusion 的 alpha sweep 也补上，避免只报告 `alpha=1.0` 和训练融合头。
+- Decision:
+  - 新增 `scripts/experiments/sweep_official_alpha.py`，复用 `artifacts/ensemble/ntu60_xview_agcn_fusion_head` 中已缓存的 train/val logits。
+- Why:
+  - sweep 不需要重跑 backbone；同时区分 train-selected alpha 与 val-oracle alpha，避免把验证集调参结果误写成严格复现结果。
+- Action/Command:
+  - `UV_CACHE_DIR=/home/atk/PyCharm/2s-AGCN/temp/uv-cache uv run python scripts/experiments/sweep_official_alpha.py --start 0 --stop 2 --step 0.001`
+  - 输出 `alpha_sweep.csv` 与 `alpha_sweep_summary.json`。
+- Verification:
+  - fixed `alpha=1.0`：val Top-1 `0.9537291358546377`，Top-5 `0.9933974223536869`。
+  - train-selected `alpha=0.497`：train Top-1 `0.9999734367529087`，val Top-1 `0.9536234946122967`。
+  - val-oracle `alpha=0.703`：val Top-1 `0.9547327276568772`，Top-5 `0.9932389604901753`。
+- Follow-up:
+  - 主线仍应报告 `alpha=1.0`；val-oracle 只能作为敏感性/上界参考。
+
+## 2026-04-27 - 项目收尾整理
+- Context:
+  - 用户要求项目阶段性收尾：诊断插桩不要留在主分支，`temp/` 下的长期实验脚本迁到正式位置。
+- Decision:
+  - 创建诊断分支 `debug/cuda-sync-hang-diagnostics`，提交 CUDA 同步诊断插桩和 bone resume 诊断 manifest。
+  - 主分支 `master` 恢复为无诊断插桩状态。
+  - 长期实验脚本迁入 `scripts/experiments/`。
+- Why:
+  - CUDA 同步插桩只用于排查假死，默认主线不应携带额外同步点或诊断配置。
+  - `temp/` 应保留缓存、临时日志和一次性材料；可复用实验脚本应作为项目资产管理。
+- Action/Command:
+  - 诊断分支提交：`9c42e84 debug(cuda): 保留 AGCN 假死同步诊断插桩`
+  - 脚本新路径：
+    - `scripts/experiments/eval_official_score_ensemble.py`
+    - `scripts/experiments/train_offline_fusion_head.py`
+    - `scripts/experiments/sweep_official_alpha.py`
+- Verification:
+  - `master` 上 `src/two_stream_agcn/models/common.py`、`src/two_stream_agcn/models/agcn.py`、`src/two_stream_agcn/integration.py` 无诊断 diff。
+  - 三个迁移后的脚本 `--help` 均可正常运行。
+- Follow-up:
+  - 若后续还要继续 CUDA 假死排查，从 `debug/cuda-sync-hang-diagnostics` 分支恢复诊断代码。

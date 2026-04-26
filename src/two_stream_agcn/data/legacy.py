@@ -78,17 +78,46 @@ class LegacySkeletonSplitDataset(Dataset[dict[str, Any]]):
             raise ValueError("At least one legacy skeleton stream file is required.")
 
         self.stream_names = tuple(stream_files)
-        self.arrays = {
-            name: np.load(Path(path), mmap_mode=mmap_mode)
+        self.stream_files = {
+            name: Path(path)
             for name, path in stream_files.items()
         }
+        self.mmap_mode = mmap_mode
         self.sample_names, self.labels = _read_label_file(Path(label_file))
         self.include_sample_name = include_sample_name
+        self.arrays: dict[str, np.ndarray] | None = None
 
-        sizes = {name: int(array.shape[0]) for name, array in self.arrays.items()}
+        sizes = {
+            name: int(np.load(path, mmap_mode=mmap_mode).shape[0])
+            for name, path in self.stream_files.items()
+        }
         sizes["labels"] = len(self.labels)
         if len(set(sizes.values())) != 1:
             raise ValueError(f"Legacy split has inconsistent sample counts: {sizes}")
+
+    def _ensure_arrays_loaded(self) -> dict[str, np.ndarray]:
+        """Lazily open legacy stream arrays.
+
+        Spawn-based DataLoader workers need to pickle the dataset object before
+        starting child processes. Holding open NumPy memmap arrays directly on
+        the dataset makes that pickle extremely large and defeats the purpose of
+        using worker processes. By reopening arrays lazily inside each process,
+        the pickled dataset only carries paths and metadata.
+        """
+
+        if self.arrays is None:
+            self.arrays = {
+                name: np.load(path, mmap_mode=self.mmap_mode)
+                for name, path in self.stream_files.items()
+            }
+        return self.arrays
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Drop opened arrays before pickling for spawn/forkserver workers."""
+
+        state = self.__dict__.copy()
+        state["arrays"] = None
+        return state
 
     def __len__(self) -> int:
         """返回当前 split 的样本数量。"""
@@ -98,9 +127,10 @@ class LegacySkeletonSplitDataset(Dataset[dict[str, Any]]):
     def __getitem__(self, index: int) -> dict[str, Any]:
         """返回符合 Foundry classification 约定的样本。"""
 
+        arrays = self._ensure_arrays_loaded()
         inputs = {
             name: torch.as_tensor(np.array(array[index], copy=True), dtype=torch.float32)
-            for name, array in self.arrays.items()
+            for name, array in arrays.items()
         }
         item: dict[str, Any] = {
             "inputs": inputs,

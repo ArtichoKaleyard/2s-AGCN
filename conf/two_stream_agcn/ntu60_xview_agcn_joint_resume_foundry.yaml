@@ -1,0 +1,20 @@
+# Foundry ExperimentManifest for resuming AGCN / NTU60 / X-View / joint.
+#
+# 这份文件只负责把 `runtime.resume_from` 固定为当前 joint 实验的 `last.pt`，
+# 避免把断点续训入口散落到命令行里。其余训练语义仍由
+# `conf/skeleton/ntu60_xview_agcn_joint.yaml` 承载。
+
+name: ntu60_xview_agcn_joint_resume_foundry
+output_dir: ./artifacts/experiments/ntu60_xview_agcn_joint_resume_foundry
+stop_on_failure: true
+
+runs:
+  - name: resume
+    mode: skeleton
+    config_dir: ./conf/skeleton
+    config_name: ntu60_xview_agcn_joint
+    overrides:
+      - +runtime.resume_from=./artifacts/skeleton/ntu60_xview_agcn_joint_foundry/last.pt
+    register_callables:
+      - two_stream_agcn.integration:register_two_stream_agcn_project
+    resolved_model_name: two_stream_agcn.agcn
